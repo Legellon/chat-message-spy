@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="">
+<head>
+    <meta charset="UTF-8">
+    <title>Twitch user access adoption</title>
+    <style>
+        body {
+            background-color: #1c1c1c; /* dark gray color */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+        }
+        .centered-token {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 2rem;
+            color: #efefef;
+        }
+    </style>
+</head>
+<body>
+    <div id="token" class="centered-token"></div>
+</body>
+<script>
+    if (window.location.hash) {
+        const hashMap = {};
+        const hashParts = window.location.hash.split('&');
+
+        hashParts[0] = hashParts[0].substring(1);
+
+        for (const s of hashParts) {
+            const s_parts = s.split('=');
+            hashMap[s_parts[0]] = s_parts[1];
+        }
+
+        const http = new XMLHttpRequest();
+        http.open("POST", "http://" + window.location.host + "/");
+        http.setRequestHeader("Twitch-User-Access-Token", hashMap['access_token']);
+
+        document.getElementById("token").textContent = hashMap['access_token'];
+
+        http.send();
+    }
+</script>
+</html>
