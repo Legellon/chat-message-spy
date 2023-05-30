@@ -12,6 +12,12 @@ criterion = { version = "0.4.0", features = ["html_reports"] }
 name = "my_benchmark"
 harness = false
 
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
 [dependencies]
 fnv = "1.0.7"
 clap = { version = "4.2.2", features = ["derive"] }

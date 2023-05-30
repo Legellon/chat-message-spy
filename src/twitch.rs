@@ -19,7 +19,7 @@ mod handlers {
             }
         };
 
-        Ok(res.body(body.into()).unwrap())
+        Ok(res.body(body).unwrap())
     }
 
     pub(super) async fn handle_post(
@@ -55,7 +55,7 @@ mod handlers {
 }
 
 use self::handlers::*;
-use crate::match_pattern::{MatchMode, MatchPattern};
+
 use crate::network::{ExpectResult, ServeExpectHandler, ShutdownSender};
 
 use crate::protocol::{ActionRes, TwitchAction};
@@ -71,9 +71,10 @@ use hyper::{
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::sync::Arc;
+
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Error;
 
 const TWITCH_USER_ACCESS_TOKEN: &str = "Twitch-User-Access-Token";
 //TODO: We can store this token in public, but good to move to .env or some kind of config for better configuration
@@ -140,7 +141,7 @@ pub fn spawn_twitch_irc(
     let channels = channels
         .take()
         .unwrap_or_default()
-        .into_iter()
+        .iter()
         .map(|&s| s.to_owned())
         .collect();
 
@@ -161,7 +162,7 @@ async fn async_connect_twitch_irc(
     login: &str,
     channels: Vec<String>,
     emitter: tokio::sync::mpsc::Sender<AppEvent>,
-    input_rx: mpsc::UnboundedReceiver<TwitchConnectionCmd>,
+    _input_rx: mpsc::UnboundedReceiver<TwitchConnectionCmd>,
 ) -> Result<(), ()> {
     let (stream, _) = connect_async(TWITCH_CHAT_URI).await.unwrap();
     let (mut write, mut read) = stream.split();
@@ -176,7 +177,7 @@ async fn async_connect_twitch_irc(
         .unwrap();
 
     match read.next().await.unwrap() {
-        Ok(Message::Text(s)) => {
+        Ok(Message::Text(_s)) => {
             //TODO: Handle failed auth with twitch chat server
         }
         Err(e) => panic!(
@@ -191,6 +192,11 @@ async fn async_connect_twitch_irc(
             .send(Message::Text(format!("JOIN #{}", channel)))
             .await
             .unwrap();
+
+        match read.next().await.unwrap() {
+            Ok(m) => println!("{:?}", m),
+            Err(_) => {}
+        }
     }
 
     while let Some(Ok(m)) = read.next().await {

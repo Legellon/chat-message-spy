@@ -1,14 +1,12 @@
-use chatspy::match_pattern::{MatchMode, MatchPattern};
+use chatspy::match_pattern::MatchPattern;
 use chatspy::protocol::*;
 use chatspy::storage::run_init_migration;
 use chatspy::twitch::{spawn_twitch_irc, TwitchConnectionCmd};
-use chatspy::{AppEvent, LockedDefaultPattern, PatternStorage, SOCKET_PATH, TwitchEvent};
-use std::io::ErrorKind::NotFound;
+use chatspy::{AppEvent, LockedDefaultPattern, PatternStorage, TwitchEvent, SOCKET_PATH};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
 // fn twitch_auth_uri(port: u16) -> String {
 //     format!(
 //         "{}?response_type=token&client_id={}&redirect_uri={}://localhost:{}&scope=chat%3Aread",
@@ -128,7 +126,9 @@ async fn main() -> std::io::Result<()> {
                 },
                 Action::Kill => event_receiver.close(),
             },
-            AppEvent::Error => { panic!("something went wrong") }
+            AppEvent::Error => {
+                panic!("something went wrong")
+            }
         };
     }
 
@@ -170,7 +170,9 @@ fn spawn_socket(emitter: tokio::sync::mpsc::Sender<AppEvent>) -> std::io::Result
             let action = serde_json::from_slice::<Action>(&buf)?;
 
             let (responder, res_receiver) = tokio::sync::oneshot::channel();
-            let _ = emitter.send(AppEvent::ExternalAction { action, responder }).await;
+            let _ = emitter
+                .send(AppEvent::ExternalAction { action, responder })
+                .await;
             let res = res_receiver.await.unwrap();
 
             stream.write_all(&serde_json::to_vec(&res)?).await?;

@@ -1,12 +1,10 @@
 use chatspy::match_pattern::MatchMode;
 use chatspy::protocol::*;
+use chatspy::SOCKET_PATH;
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use tokio::io::Result as IoResult;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
-use chatspy::SOCKET_PATH;
-
+use tokio::net::UnixStream;
 
 #[derive(Parser)]
 struct Args {

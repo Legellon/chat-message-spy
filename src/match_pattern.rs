@@ -1,12 +1,7 @@
 use crate::match_pattern::match_fns::MatchFnPtr;
-use clap::builder::Str;
 use clap::ValueEnum;
-use fnv::FnvHashSet;
-use hyper::body::Buf;
-use serde::__private::de::Borrowed;
 use serde::{Deserialize, Serialize};
-use std::borrow::{Borrow, Cow};
-use std::collections::HashSet;
+use std::borrow::Cow;
 
 mod match_fns {
     use super::MatchPattern;
@@ -223,7 +218,6 @@ impl MatchPattern {
                     .filter(|c| !self.ignore_chars.contains(*c))
                     .collect::<String>()
                     .to_lowercase()
-                    .into(),
             )
         }
     }

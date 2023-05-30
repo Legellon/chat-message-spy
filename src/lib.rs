@@ -1,8 +1,7 @@
-use std::error::Error;
 use crate::match_pattern::MatchPattern;
 use crate::protocol::{Action, ActionRes};
 use fnv::FnvHashMap;
-use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock};
 
 pub mod match_pattern;
 pub mod network;
@@ -28,8 +27,8 @@ pub enum AppEvent {
 }
 
 type Locked<T> = Arc<RwLock<T>>;
-type LockedPattern = Locked<MatchPattern>;
-type LockedPatternMap = Locked<FnvHashMap<String, LockedPattern>>;
+pub type LockedPattern = Locked<MatchPattern>;
+pub type LockedPatternMap = Locked<FnvHashMap<String, LockedPattern>>;
 pub type LockedDefaultPattern = Locked<Option<LockedPattern>>;
 
 #[derive(Debug)]
@@ -62,17 +61,12 @@ impl PatternStorage {
     }
 
     pub fn default_pattern(&self) -> LockedDefaultPattern {
-        // if let Some(p) = &self.default_pattern.read().unwrap() {
-        //     Ok()
-        // } else {
-        //     Err(())
-        // }
-        // let lock = self.default_pattern.read().unwrap();
-        // if let Some(p) = lock.clone() {
-        //     Ok(p.clone())
-        // } else {
-        //     Err(())
-        // }
         self.default_pattern.clone()
+    }
+}
+
+impl Default for PatternStorage {
+    fn default() -> Self {
+        PatternStorage::new()
     }
 }
