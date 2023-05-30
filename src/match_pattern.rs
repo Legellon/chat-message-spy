@@ -1,30 +1,40 @@
+use crate::match_pattern::match_fns::MatchFnPtr;
+use clap::builder::Str;
+use clap::ValueEnum;
+use fnv::FnvHashSet;
+use hyper::body::Buf;
+use serde::__private::de::Borrowed;
+use serde::{Deserialize, Serialize};
+use std::borrow::{Borrow, Cow};
 use std::collections::HashSet;
 
 mod match_fns {
     use super::MatchPattern;
+    use std::borrow::Cow;
 
-    pub(super) fn match_inclusive(p: &MatchPattern, w: &str) -> bool {
+    pub(super) type MatchFnInput<'a> = Cow<'a, str>;
+    pub(super) type MatchFnPtr = fn(&MatchPattern, &MatchFnInput) -> bool;
+
+    pub(super) fn match_inclusive(p: &MatchPattern, w: &MatchFnInput) -> bool {
         p.words
             .iter()
             .map(|pattern_w| (w.as_bytes().windows(pattern_w.len()), pattern_w.as_bytes()))
             .any(|(sub_ws, pattern_w)| sub_ws.map(|w| w == pattern_w).any(|b| b))
     }
 
-    pub(super) fn match_exclusive(p: &MatchPattern, w: &str) -> bool {
-        p.words.contains(w)
+    pub(super) fn match_exclusive(p: &MatchPattern, w: &MatchFnInput) -> bool {
+        p.words.iter().any(|s| s == w)
     }
 }
-
-type MatchFnPtr = fn(&MatchPattern, &str) -> bool;
 
 trait MatchFnDispatcher {
     fn dispatch_match_fn(&self) -> MatchFnPtr;
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Serialize, Deserialize, Default, Copy, Clone, Debug, ValueEnum)]
 pub enum MatchMode {
-    Inclusive,
     #[default]
+    Inclusive,
     Exclusive,
 }
 
@@ -37,37 +47,74 @@ impl MatchFnDispatcher for MatchMode {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MatchPattern {
-    words: HashSet<String>,
+    words: Vec<String>,
+    ignore_chars: String,
     max_len: usize,
     min_len: usize,
     mode: MatchMode,
     match_fn: MatchFnPtr,
 }
 
-impl<'a, T> From<T> for MatchPattern
-where
-    T: IntoIterator<Item = &'a str>,
-{
-    fn from(value: T) -> Self {
-        let words: HashSet<_> = value.into_iter().map(MatchPattern::format_word).collect();
-        let mode = MatchMode::default();
-        let (min, max) = MatchPattern::get_minmax_len(&words);
-        MatchPattern {
-            words,
-            max_len: max,
-            min_len: min,
-            match_fn: mode.dispatch_match_fn(),
-            mode,
+// impl<'a, T: IntoIterator<Item = AsRef<str>>> From<T> for MatchPattern {
+//     fn from(value: T) -> Self {
+//         let mut p = MatchPattern::new();
+//         p.extend(value);
+//         p
+//     }
+// }
+//
+// impl<'a, T: IntoIterator<Item = String>> From<T> for MatchPattern {
+//     fn from(value: T) -> Self {
+//         let mut p = MatchPattern::new();
+//         p.extend(value);
+//         p
+//     }
+// }
+//
+pub struct MatchPatternBuilder {
+    pattern: MatchPattern,
+}
+
+impl MatchPatternBuilder {
+    pub fn new() -> Self {
+        MatchPatternBuilder {
+            pattern: MatchPattern::new(),
         }
+    }
+
+    pub fn exclusive(mut self) -> Self {
+        self.pattern.set_mode(MatchMode::Exclusive);
+        self
+    }
+
+    pub fn inclusive(mut self) -> Self {
+        self.pattern.set_mode(MatchMode::Inclusive);
+        self
+    }
+
+    pub fn mode(mut self, m: MatchMode) -> Self {
+        self.pattern.set_mode(m);
+        self
+    }
+
+    pub fn words<'a>(mut self, words: impl IntoIterator<Item = impl Into<Cow<'a, str>>>) -> Self {
+        self.pattern.extend(words);
+        self
+    }
+
+    pub fn build(self) -> MatchPattern {
+        self.pattern
     }
 }
 
-impl<'a> MatchPattern {
+impl MatchPattern {
     pub fn new() -> Self {
         let mode = MatchMode::default();
         MatchPattern {
-            words: HashSet::new(),
+            words: vec![],
+            ignore_chars: String::new(),
             max_len: 0,
             min_len: 0,
             match_fn: mode.dispatch_match_fn(),
@@ -75,11 +122,15 @@ impl<'a> MatchPattern {
         }
     }
 
+    pub fn builder() -> MatchPatternBuilder {
+        MatchPatternBuilder::new()
+    }
+
     pub fn mode(&self) -> MatchMode {
         self.mode
     }
 
-    pub fn words(&self) -> &HashSet<String> {
+    pub fn words(&self) -> &Vec<String> {
         &self.words
     }
 
@@ -88,29 +139,43 @@ impl<'a> MatchPattern {
         self.mode = mode;
     }
 
-    pub fn extend(&mut self, words: impl IntoIterator<Item = &'a str>) {
-        let words = words.into_iter().map(MatchPattern::format_word);
-        self.words.extend(words);
+    pub fn extend<'a>(&mut self, words: impl IntoIterator<Item = impl Into<Cow<'a, str>>>) {
+        let words_iter = words
+            .into_iter()
+            .map(|s| self.format_word(s).to_string())
+            .collect::<Vec<_>>();
+        self.words.extend(words_iter);
         self.on_words_mut();
     }
 
     pub fn insert(&mut self, word: &str) {
-        let word = MatchPattern::format_word(word);
-        self.words.insert(word);
+        let word = self.format_word(word).to_string();
+        self.words.push(word);
         self.on_words_mut();
     }
 
     pub fn remove(&mut self, word: &str) -> bool {
-        if self.words.remove(word) {
+        if let Some(p) = self.words.iter().position(|s| s == word) {
+            self.words.swap_remove(p);
             self.on_words_mut();
-            return true;
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    pub fn remove_position(&mut self, p: usize) -> bool {
+        if p > self.words.len() {
+            return false;
+        }
+        self.words.swap_remove(p);
+        self.on_words_mut();
+        true
     }
 
     pub fn match_str(&self, str: &str) -> bool {
         str.split(' ')
-            .map(MatchPattern::format_word)
+            .map(|w| self.format_word(w))
             .filter(|s| self.min_len <= s.len())
             .any(|s| (self.match_fn)(self, &s))
     }
@@ -120,7 +185,7 @@ impl<'a> MatchPattern {
         (self.min_len, self.max_len) = MatchPattern::get_minmax_len(&self.words);
     }
 
-    fn get_minmax_len(words: &HashSet<String>) -> (usize, usize) {
+    fn get_minmax_len(words: &Vec<String>) -> (usize, usize) {
         if words.is_empty() {
             return (0, 0);
         }
@@ -143,11 +208,24 @@ impl<'a> MatchPattern {
         (min, max)
     }
 
-    fn format_word(word: &str) -> String {
-        word.to_lowercase()
+    fn format_word<'a>(&self, w: impl Into<Cow<'a, str>>) -> Cow<'a, str> {
+        let cow = w.into();
+
+        let is_correct = cow
             .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect()
+            .all(|c| c.is_lowercase() && !self.ignore_chars.contains(c));
+
+        if is_correct {
+            cow
+        } else {
+            Cow::Owned(
+                cow.chars()
+                    .filter(|c| !self.ignore_chars.contains(*c))
+                    .collect::<String>()
+                    .to_lowercase()
+                    .into(),
+            )
+        }
     }
 }
 
@@ -163,10 +241,10 @@ mod tests {
         p.insert("a");
         assert_eq!((p.min_len, p.max_len), (1, 1));
 
-        p.insert("abc;;;;");
+        p.insert("abc");
         assert_eq!((p.min_len, p.max_len), (1, 3));
 
-        p.extend(["s", "as", "abcd", "ab,,,,,,cde"]);
+        p.extend(["s", "as", "abcd", "abcde"]);
         assert_eq!((p.min_len, p.max_len), (1, 5));
 
         p.remove("a");
@@ -191,14 +269,6 @@ mod tests {
         p.remove("example");
 
         p.set_mode(MatchMode::Inclusive);
-        assert_eq!(p.match_str(text), true);
-    }
-
-    #[test]
-    fn format() {
-        let text = "so.....me te,xt t,.,3./o filter";
-
-        let p = MatchPattern::from(["so.,.me"]);
         assert_eq!(p.match_str(text), true);
     }
 }

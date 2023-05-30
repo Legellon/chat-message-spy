@@ -4,18 +4,23 @@ fn insert_twitch_message(_conn: &Connection, _message: TwitchMessage) {}
 
 #[derive(Debug, Clone)]
 pub struct TwitchToken {
-    pub id: u64,
-    pub token: String,
-    pub login: String,
+    pub id: Option<u64>,
+    pub token: Option<String>,
+    pub login: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct TwitchMessage {
-    pub id: u64,
-    pub author: String,
-    pub content: String,
-    pub chat: String,
-    pub time: String,
+    pub id: Option<u64>,
+    pub author: Option<String>,
+    pub content: Option<String>,
+    pub chat: Option<String>,
+    pub time: Option<String>,
+}
+
+pub fn run_init_migration(conn: &Connection) {
+    create_token_table(conn);
+    create_message_table(conn);
 }
 
 pub fn create_token_table(conn: &Connection) {
@@ -40,9 +45,9 @@ pub fn get_stored_users(db_conn: &Connection) -> Vec<TwitchToken> {
         Ok(mut s) => s
             .query_map([], |row| {
                 Ok(TwitchToken {
-                    id: row.get(0).unwrap(),
-                    token: row.get(1).unwrap(),
-                    login: row.get(2).unwrap(),
+                    id: Some(row.get(0).unwrap()),
+                    token: Some(row.get(1).unwrap()),
+                    login: Some(row.get(2).unwrap()),
                 })
             })
             .unwrap()
@@ -69,7 +74,7 @@ pub fn create_message_table(conn: &Connection) {
 
 fn ignore_table_exists_error(e: Error) {
     match e {
-        //Error has values which indicates that query failed with an error "Table already exists", then ignore it
+        //Error has values which indicate that this is 'table already exists' error
         Error::SqlInputError {
             error:
                 rusqlite::ffi::Error {

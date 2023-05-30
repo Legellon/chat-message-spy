@@ -27,7 +27,7 @@ impl Server {
         Server { listener: None }
     }
 
-    pub async fn bind_listener(&mut self, port: u16) {
+    pub async fn bind_local_listener(&mut self, port: u16) {
         self.listener = match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
             Ok(l) => Some(l),
             Err(e) => panic!("{}", e),
@@ -41,12 +41,12 @@ impl Server {
             + Send
             + Sync
             + 'static,
-    ) -> tokio::sync::oneshot::Receiver<T> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+    ) -> tokio::sync::oneshot::Receiver<T> where {
+        let (tx_kill, rx_kill) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
             let listener = self.listener.unwrap();
-            let tx = Arc::new(Mutex::new(Some(tx)));
+            let tx = Arc::new(Mutex::new(Some(tx_kill)));
             loop {
                 let tx = tx.clone();
                 if tx.lock().unwrap().is_none() {
@@ -57,6 +57,6 @@ impl Server {
             }
         });
 
-        rx
+        rx_kill
     }
 }

@@ -1,4 +1,3 @@
-mod token;
 mod handlers {
     use super::*;
 
@@ -56,8 +55,11 @@ mod handlers {
 }
 
 use self::handlers::*;
+use crate::match_pattern::{MatchMode, MatchPattern};
 use crate::network::{ExpectResult, ServeExpectHandler, ShutdownSender};
 
+use crate::protocol::{ActionRes, TwitchAction};
+use crate::{AppEvent, TwitchEvent};
 use futures::{future::BoxFuture, SinkExt, StreamExt};
 use http_body_util::Full;
 use hyper::{
@@ -69,6 +71,7 @@ use hyper::{
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -119,40 +122,49 @@ impl ServeExpectHandler for TwitchAuthHandler {
     }
 }
 
-pub enum TwitchIrcCommand {
-    Join(String),
+pub struct TwitchConnectionCmd {
+    pub action: TwitchAction,
+    pub responder: tokio::sync::oneshot::Sender<ActionRes>,
 }
 
-pub fn spawn_twitch_irc_connection(
-    channels: &'static [&str],
-) -> (
-    mpsc::UnboundedSender<TwitchIrcCommand>,
-    mpsc::Receiver<String>,
-) {
-    let (msg_tx, msg_rx) = mpsc::channel(100);
-    let (irc_tx, irc_rx) = mpsc::unbounded_channel();
+pub enum TwitchConnectionEvent {
+    Message(String),
+}
+
+pub fn spawn_twitch_irc(
+    emitter: tokio::sync::mpsc::Sender<AppEvent>,
+    mut channels: Option<&[&str]>,
+) -> mpsc::UnboundedSender<TwitchConnectionCmd> {
+    let (cmd_sender, cmd_receiver) = mpsc::unbounded_channel();
+
+    let channels = channels
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|&s| s.to_owned())
+        .collect();
 
     tokio::spawn(async_connect_twitch_irc(
         "",
         ANONYMOUS_LOGIN,
         channels,
-        msg_tx,
-        irc_rx,
+        emitter,
+        cmd_receiver,
     ));
 
-    (irc_tx, msg_rx)
+    cmd_sender
 }
 
 //TODO: Add more verbose error handling
 async fn async_connect_twitch_irc(
     token: &str,
     login: &str,
-    channels: &[&str],
-    tx: mpsc::Sender<String>,
-    _rx: mpsc::UnboundedReceiver<TwitchIrcCommand>,
+    channels: Vec<String>,
+    emitter: tokio::sync::mpsc::Sender<AppEvent>,
+    input_rx: mpsc::UnboundedReceiver<TwitchConnectionCmd>,
 ) -> Result<(), ()> {
-    let (socket, _) = connect_async(TWITCH_CHAT_URI).await.unwrap();
-    let (mut write, mut read) = socket.split();
+    let (stream, _) = connect_async(TWITCH_CHAT_URI).await.unwrap();
+    let (mut write, mut read) = stream.split();
 
     write
         .send(Message::Text(format!("PASS oauth:{}", token)))
@@ -166,9 +178,11 @@ async fn async_connect_twitch_irc(
     match read.next().await.unwrap() {
         Ok(Message::Text(s)) => {
             //TODO: Handle failed auth with twitch chat server
-            print!("{}", s);
         }
-        Err(e) => panic!("ERROR: failed to send message on twitch chat auth: {}", e),
+        Err(e) => panic!(
+            "ERROR: failed to send message to twitch while authentication: {}",
+            e
+        ),
         any => panic!("ERROR: unknown exception on twitch chat auth: {:?}", any),
     }
 
@@ -179,21 +193,25 @@ async fn async_connect_twitch_irc(
             .unwrap();
     }
 
-    while let Ok(m) = read.next().await.unwrap() {
+    while let Some(Ok(m)) = read.next().await {
         match m {
             Message::Text(s) => {
                 if !s.starts_with(':') {
                     let s_parts: Vec<_> = s.split(' ').collect();
                     match &s_parts[..] {
                         ["PING", uri, ..] => write
-                            .send(Message::Text(format!("PING {}", uri)))
+                            .send(Message::Text(format!("PONG {}", uri)))
                             .await
                             .unwrap(),
-                        x => unreachable!("ERROR: unknown twitch chat command: {:?}", x),
+                        sl => {
+                            unreachable!("ERROR: unknown twitch chat command: {:?}", sl)
+                        }
                     }
                     continue;
                 }
-                tx.send(s).await.unwrap();
+                let _ = emitter
+                    .send(AppEvent::Twitch(TwitchEvent::Message(s)))
+                    .await;
             }
             m => unreachable!(
                 "ERROR: unknown message type from {}: {}",
