@@ -217,7 +217,7 @@ impl MatchPattern {
                 cow.chars()
                     .filter(|c| !self.ignore_chars.contains(*c))
                     .collect::<String>()
-                    .to_lowercase()
+                    .to_lowercase(),
             )
         }
     }

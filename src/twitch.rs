@@ -1,9 +1,16 @@
 mod handlers {
-    use super::*;
+    use crate::network::ShutdownSender;
+    use crate::twitch::TWITCH_USER_ACCESS_TOKEN;
+    use http_body_util::Full;
+    use hyper::body::{Bytes, Incoming};
+    use hyper::header::CONTENT_TYPE;
+    use hyper::{Request, Response, StatusCode};
+    use std::convert::Infallible;
 
-    pub(super) async fn handle_get(
-        _req: Request<Incoming>,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
+    type HandlerReq = Request<Incoming>;
+    type HandlerRes = Result<Response<Full<Bytes>>, Infallible>;
+
+    pub(super) async fn handle_get(_req: HandlerReq) -> HandlerRes {
         let mut res = Response::builder().header(CONTENT_TYPE, "text/html");
 
         let body;
@@ -22,10 +29,7 @@ mod handlers {
         Ok(res.body(body).unwrap())
     }
 
-    pub(super) async fn handle_post(
-        req: Request<Incoming>,
-        tx: ShutdownSender<String>,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
+    pub(super) async fn handle_post(req: HandlerReq, tx: ShutdownSender<String>) -> HandlerRes {
         let mut res = Response::builder();
 
         if let Some(token) = req.headers().get(TWITCH_USER_ACCESS_TOKEN) {
@@ -43,9 +47,7 @@ mod handlers {
         Ok(res.body(Full::new(Bytes::new())).unwrap())
     }
 
-    pub(super) async fn handle_not_found(
-        _req: Request<Incoming>,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
+    pub(super) async fn handle_not_found(_req: HandlerReq) -> HandlerRes {
         let res = Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Full::new(Bytes::from("404: not found")))
@@ -55,34 +57,30 @@ mod handlers {
 }
 
 use self::handlers::*;
-
 use crate::network::{ExpectResult, ServeExpectHandler, ShutdownSender};
-
-use crate::protocol::{ActionRes, TwitchAction};
+use crate::protocol::{ActionRes, PartAction, TwitchAction};
 use crate::{AppEvent, TwitchEvent};
+use futures::stream::{SplitSink, SplitStream};
 use futures::{future::BoxFuture, SinkExt, StreamExt};
-use http_body_util::Full;
-use hyper::{
-    body::{Bytes, Incoming},
-    header::CONTENT_TYPE,
-    server::conn::http1,
-    service::service_fn,
-    Method, Request, Response, StatusCode,
-};
+use hyper::{server::conn::http1, service::service_fn, Method};
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-
-use tokio::{net::TcpStream, sync::mpsc};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Error;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 const TWITCH_USER_ACCESS_TOKEN: &str = "Twitch-User-Access-Token";
-//TODO: We can store this token in public, but good to move to .env or some kind of config for better configuration
 const TWITCH_CLIENT_ID: &str = "85ningw35fofi86ue5bbahw22xsazw";
 const TWITCH_CHAT_URI: &str = "ws://irc-ws.chat.twitch.tv:80";
 const TWITCH_AUTH_ENDPOINT: &str = "https://id.twitch.tv/oauth2/authorize";
 const TWITCH_VALIDATE_ENDPOINT: &str = "https://id.twitch.tv/oauth2/validate";
 const ANONYMOUS_LOGIN: &str = "justinfan1337";
+
+pub type WriteHalf = SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>;
+pub type ReadHalf = SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
+pub type AppEventEmitter = crossbeam::channel::Sender<AppEvent>;
+pub type TwitchCmdReceiver = mpsc::Receiver<TwitchConnectionCmd>;
+pub type TwitchCmdSender = mpsc::Sender<TwitchConnectionCmd>;
+pub type ActionResponder = tokio::sync::oneshot::Sender<ActionRes>;
 
 #[derive(Deserialize, Serialize)]
 struct ValidatedTokenResponse {
@@ -99,7 +97,7 @@ impl ServeExpectHandler for TwitchAuthHandler {
     type Output = String;
 
     fn expect_handler(
-        stream: TcpStream,
+        stream: tokio::net::TcpStream,
         tx: ShutdownSender<Self::Output>,
     ) -> BoxFuture<'static, ExpectResult<()>> {
         Box::pin(async move {
@@ -125,7 +123,7 @@ impl ServeExpectHandler for TwitchAuthHandler {
 
 pub struct TwitchConnectionCmd {
     pub action: TwitchAction,
-    pub responder: tokio::sync::oneshot::Sender<ActionRes>,
+    pub responder: ActionResponder,
 }
 
 pub enum TwitchConnectionEvent {
@@ -133,19 +131,14 @@ pub enum TwitchConnectionEvent {
 }
 
 pub fn spawn_twitch_irc(
-    emitter: tokio::sync::mpsc::Sender<AppEvent>,
-    mut channels: Option<&[&str]>,
-) -> mpsc::UnboundedSender<TwitchConnectionCmd> {
-    let (cmd_sender, cmd_receiver) = mpsc::unbounded_channel();
+    emitter: AppEventEmitter,
+    channels: Option<Vec<String>>,
+) -> TwitchCmdSender {
+    let (cmd_sender, cmd_receiver) = mpsc::channel(16);
 
-    let channels = channels
-        .take()
-        .unwrap_or_default()
-        .iter()
-        .map(|&s| s.to_owned())
-        .collect();
+    let channels = channels.unwrap_or_default();
 
-    tokio::spawn(async_connect_twitch_irc(
+    let _ = tokio::spawn(async_connect_twitch_irc(
         "",
         ANONYMOUS_LOGIN,
         channels,
@@ -156,75 +149,162 @@ pub fn spawn_twitch_irc(
     cmd_sender
 }
 
+async fn join(w: &mut WriteHalf, channel: String) {
+    w.send(Message::Text(format!("JOIN #{}", channel)))
+        .await
+        .unwrap();
+}
+
+async fn join_many(w: &mut WriteHalf, channels: Vec<String>) {
+    for channel in channels {
+        join(w, channel).await;
+    }
+}
+
+async fn auth(w: &mut WriteHalf, r: &mut ReadHalf, token: &str, login: &str) {
+    w.send(Message::Text(format!("PASS oauth:{}", token)))
+        .await
+        .unwrap();
+    w.send(Message::Text(format!("NICK {}", login)))
+        .await
+        .unwrap();
+}
+
+async fn part(w: &mut WriteHalf, channel: &str) {
+    w.send(Message::Text(format!("PART #{}", channel)))
+        .await
+        .unwrap();
+}
+
+async fn part_many(w: &mut WriteHalf, channels: &[String]) {
+    for ch in channels {
+        part(w, ch.as_str()).await;
+    }
+}
+
+enum IrcMessage {
+    Ping(String),
+    Privmsg(String),
+}
+
+fn split_msg(m: Message) -> Vec<IrcMessage> {
+    match m {
+        Message::Text(s) => s
+            .split("\r\n")
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if !s.starts_with(':') {
+                    let s_parts: Vec<_> = s.split(' ').collect();
+                    match &s_parts[..] {
+                        ["PING", uri, ..] => IrcMessage::Ping(format!("PONG {}", uri)),
+                        any => unreachable!("ERROR: unknown twitch chat command: {:?}", any),
+                    }
+                } else {
+                    IrcMessage::Privmsg(s.to_owned())
+                }
+            })
+            .collect(),
+        m => unreachable!(
+            "ERROR: unknown message type from {}: {}",
+            TWITCH_CHAT_URI, m
+        ),
+    }
+}
+
+async fn handle_irc(w: &mut WriteHalf, e: &AppEventEmitter, m: IrcMessage) {
+    match m {
+        IrcMessage::Ping(pong) => {
+            let _ = w.send(Message::Text(pong)).await;
+        }
+        IrcMessage::Privmsg(m) => {
+            let _ = e.send(AppEvent::Twitch(TwitchEvent::Message(m)));
+        }
+    }
+}
+
+async fn handle_cmd(w: &mut WriteHalf, action: TwitchAction) -> ActionRes {
+    match action {
+        TwitchAction::Join(channels) => {
+            join_many(w, channels).await;
+            ActionRes::Success
+        }
+        TwitchAction::Part(a) => match a {
+            PartAction::Some(channels) => {
+                part_many(w, &channels).await;
+                ActionRes::Success
+            }
+            PartAction::All => unreachable!(),
+        },
+        TwitchAction::Start(_) => unreachable!(),
+    }
+}
+
 //TODO: Add more verbose error handling
 async fn async_connect_twitch_irc(
     token: &str,
     login: &str,
     channels: Vec<String>,
-    emitter: tokio::sync::mpsc::Sender<AppEvent>,
-    _input_rx: mpsc::UnboundedReceiver<TwitchConnectionCmd>,
+    emitter: AppEventEmitter,
+    mut cmd_receiver: TwitchCmdReceiver,
 ) -> Result<(), ()> {
     let (stream, _) = connect_async(TWITCH_CHAT_URI).await.unwrap();
     let (mut write, mut read) = stream.split();
 
-    write
-        .send(Message::Text(format!("PASS oauth:{}", token)))
-        .await
-        .unwrap();
-    write
-        .send(Message::Text(format!("NICK {}", login)))
-        .await
-        .unwrap();
+    auth(&mut write, &mut read, token, login).await;
+    join_many(&mut write, channels).await;
 
-    match read.next().await.unwrap() {
-        Ok(Message::Text(_s)) => {
-            //TODO: Handle failed auth with twitch chat server
-        }
-        Err(e) => panic!(
-            "ERROR: failed to send message to twitch while authentication: {}",
-            e
-        ),
-        any => panic!("ERROR: unknown exception on twitch chat auth: {:?}", any),
-    }
-
-    for channel in channels {
-        write
-            .send(Message::Text(format!("JOIN #{}", channel)))
-            .await
-            .unwrap();
-
-        match read.next().await.unwrap() {
-            Ok(m) => println!("{:?}", m),
-            Err(_) => {}
-        }
-    }
-
-    while let Some(Ok(m)) = read.next().await {
-        match m {
-            Message::Text(s) => {
-                if !s.starts_with(':') {
-                    let s_parts: Vec<_> = s.split(' ').collect();
-                    match &s_parts[..] {
-                        ["PING", uri, ..] => write
-                            .send(Message::Text(format!("PONG {}", uri)))
-                            .await
-                            .unwrap(),
-                        sl => {
-                            unreachable!("ERROR: unknown twitch chat command: {:?}", sl)
-                        }
+    loop {
+        tokio::select! {
+            irc_msg = read.next() => {
+                if let Some(Ok(msg)) = irc_msg {
+                    let msgs = split_msg(msg);
+                    for m in msgs {
+                        handle_irc(&mut write, &emitter, m).await;
                     }
-                    continue;
+                } else {
+                    break;
                 }
-                let _ = emitter
-                    .send(AppEvent::Twitch(TwitchEvent::Message(s)))
-                    .await;
+            },
+            cmd = cmd_receiver.recv() => {
+                let cmd = cmd.unwrap();
+                let TwitchConnectionCmd { action, responder } = cmd;
+
+                if let TwitchAction::Part(PartAction::All) = action {
+                    let _ = responder.send(ActionRes::Success);
+                    break;
+                }
+
+                let res = handle_cmd(&mut write, action).await;
+                let _ = responder.send(res);
             }
-            m => unreachable!(
-                "ERROR: unknown message type from {}: {}",
-                TWITCH_CHAT_URI, m
-            ),
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct UserMessage {
+    pub channel: String,
+    pub author: String,
+    pub message: String,
+}
+
+pub fn parse_privmsg(s: &str) -> Option<UserMessage> {
+    let mut splitn = s.splitn(3, ':');
+    let _ = splitn.next()?;
+
+    let mut prefix = splitn.next()?.split_terminator(' ');
+
+    let author = prefix.next()?.split('!').next()?.to_owned();
+    let _ = prefix.next()?;
+    let channel = prefix.next()?[1..].to_owned();
+
+    let message = splitn.next()?.to_owned();
+
+    Some(UserMessage {
+        channel,
+        author,
+        message,
+    })
 }

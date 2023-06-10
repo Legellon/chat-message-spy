@@ -26,14 +26,22 @@ enum AddCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum GetCommand {
+    Messages {
+        #[arg(short, long)]
+        author: Option<String>,
+        #[arg(short, long)]
+        channel: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum CliCommand {
     Start {
         #[arg(short, long, value_parser, num_args=1.., value_delimiter = ',')]
         channels: Option<Vec<String>>,
     },
-    Stop {
-        channel: Option<String>,
-        #[arg(short, long, value_parser, num_args=1.., value_delimiter = ',')]
+    Part {
         channels: Option<Vec<String>>,
     },
     Join {
@@ -42,6 +50,10 @@ enum CliCommand {
     Add {
         #[command(subcommand)]
         add_command: AddCommand,
+    },
+    Get {
+        #[command(subcommand)]
+        get_command: GetCommand,
     },
 }
 
@@ -55,23 +67,20 @@ fn parse_start(chs: Option<Vec<String>>) -> Action {
 }
 
 #[inline]
-fn parse_stop(ch: Option<String>, chs: Option<Vec<String>>) -> Action {
-    match (ch, chs) {
-        (None, None) => Action::Twitch(TwitchAction::Part(PartAction::All)),
-        (Some(ch), _) => Action::Twitch(TwitchAction::Part(PartAction::One(ch))),
-        (_, Some(chs)) => Action::Twitch(TwitchAction::Part(PartAction::Many(chs))),
-    }
+fn parse_part(channels: Option<Vec<String>>) -> Action {
+    let a = match channels {
+        None => PartAction::All,
+        Some(c) => PartAction::Some(c),
+    };
+    Action::Twitch(TwitchAction::Part(a))
 }
 
 #[inline]
-fn parse_join(chs: Vec<String>) -> Action {
-    if chs.len() == 1 {
-        Action::Twitch(TwitchAction::Join(JoinAction::One(chs[0].clone())))
-    } else {
-        Action::Twitch(TwitchAction::Join(JoinAction::Many(chs)))
-    }
+fn parse_join(channels: Vec<String>) -> Action {
+    Action::Twitch(TwitchAction::Join(channels))
 }
 
+#[inline]
 fn parse_add(a: AddCommand) -> Action {
     match a {
         AddCommand::Pattern {
@@ -87,15 +96,24 @@ fn parse_add(a: AddCommand) -> Action {
     }
 }
 
+fn parse_get(a: GetCommand) -> Action {
+    match a {
+        GetCommand::Messages { author, channel } => {
+            Action::Get(GetAction::Messages { author, channel })
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> IoResult<()> {
     let cli = Args::parse();
 
     let action = match cli.command {
         CliCommand::Start { channels } => parse_start(channels),
-        CliCommand::Stop { channel, channels } => parse_stop(channel, channels),
+        CliCommand::Part { channels } => parse_part(channels),
         CliCommand::Join { channels } => parse_join(channels),
         CliCommand::Add { add_command } => parse_add(add_command),
+        CliCommand::Get { get_command } => parse_get(get_command),
     };
 
     let res = execute_action(action).await?;
@@ -116,6 +134,10 @@ async fn main() -> IoResult<()> {
             }
         },
         ActionRes::Success => println!("ok"),
+        ActionRes::Data(s) => {
+            println!("ok; received data:");
+            println!("{}", s);
+        }
     }
 
     Ok(())

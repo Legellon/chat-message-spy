@@ -19,6 +19,7 @@ codegen-units = 1
 panic = "abort"
 
 [dependencies]
+fork = "0.1.21"
 fnv = "1.0.7"
 clap = { version = "4.2.2", features = ["derive"] }
 serde = { version = "1.0.160", features = ["derive"] }

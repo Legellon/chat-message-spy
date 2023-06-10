@@ -1,9 +1,11 @@
 use chatspy::match_pattern::MatchPattern;
 use chatspy::protocol::*;
-use chatspy::storage::run_init_migration;
-use chatspy::twitch::{spawn_twitch_irc, TwitchConnectionCmd};
-use chatspy::{AppEvent, LockedDefaultPattern, PatternStorage, TwitchEvent, SOCKET_PATH};
+use chatspy::storage::{get_messages, insert_message, run_init_migration};
+use chatspy::twitch::{AppEventEmitter, parse_privmsg, spawn_twitch_irc, TwitchConnectionCmd};
+use chatspy::{AppEvent, PatternStorage, TwitchEvent, SOCKET_PATH, TWITCH_DB_PATH};
+use clap::Parser;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -85,60 +87,98 @@ const TEST_CHANNELS: [&str; 33] = [
     "tarik",
 ];
 
-#[tokio::main]
+#[derive(Parser)]
+struct Args {
+    #[arg(short, long, value_parser, num_args=1.., value_delimiter = ',')]
+    channels: Option<Vec<String>>,
+    #[arg(short, long)]
+    test: Option<bool>,
+}
+
+fn open_sqlite() {
+    let sqlt = rusqlite::Connection::open(TWITCH_DB_PATH).unwrap();
+    run_init_migration(&sqlt);
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    let sqlite_conn = rusqlite::Connection::open_in_memory().unwrap();
-    run_init_migration(&sqlite_conn);
+    let args = Args::parse();
 
-    let pattern_storage = PatternStorage::new();
+    let prejoin = if args.test.unwrap_or_default() {
+        Some(TEST_CHANNELS.into_iter().map(|s| s.to_owned()).collect())
+    } else {
+        args.channels
+    };
 
-    let (event_emitter, mut event_receiver) = tokio::sync::mpsc::channel(256);
+    open_sqlite();
+    let pattern_storage = Arc::new(PatternStorage::new());
+    let (event_emitter, event_receiver) = crossbeam::channel::bounded(128);
 
     spawn_socket(event_emitter.clone())?;
-    let twitch_cmd_sender = spawn_twitch_irc(event_emitter.clone(), Some(&TEST_CHANNELS));
+    let twitch_cmd_sender = spawn_twitch_irc(event_emitter.clone(), prejoin);
+    let processor_sender = spawn_processor(pattern_storage.clone());
 
-    let processor_sender = spawn_processor(pattern_storage.default_pattern());
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+    let kill_tx = Arc::new(Mutex::new(Some(kill_tx)));
 
-    while let Some(e) = event_receiver.recv().await {
-        match e {
-            AppEvent::Twitch(e) => match e {
-                TwitchEvent::Message(m) => {
-                    let _ = processor_sender.send(m);
-                }
-            },
-            AppEvent::ExternalAction { action, responder } => match action {
-                Action::Twitch(a) => {
-                    let _ = twitch_cmd_sender.send(TwitchConnectionCmd {
-                        action: a,
-                        responder,
-                    });
-                }
-                Action::Add(a) => match a {
-                    AddAction::Pattern {
-                        name,
-                        raw_pattern: rp,
-                        default,
-                    } => {
-                        let p = MatchPattern::builder().words(rp.0).mode(rp.1).build();
-                        pattern_storage.add(name, p, default).unwrap();
-                        let _ = responder.send(ActionRes::Success);
+    let _ = std::thread::spawn(move || {
+        while let Ok(e) = event_receiver.recv() {
+            match e {
+                AppEvent::Twitch(e) => match e {
+                    TwitchEvent::Message(m) => {
+                        let _ = processor_sender.send(m);
                     }
                 },
-                Action::Kill => event_receiver.close(),
-            },
-            AppEvent::Error => {
-                panic!("something went wrong")
-            }
-        };
-    }
+                AppEvent::ExternalAction { action, responder } => match action {
+                    Action::Twitch(a) => {
+                        let _ = twitch_cmd_sender.blocking_send(TwitchConnectionCmd {
+                            action: a,
+                            responder,
+                        });
+                    }
+                    Action::Add(a) => match a {
+                        AddAction::Pattern {
+                            name,
+                            raw_pattern: rp,
+                            default,
+                        } => {
+                            let pattern_storage = pattern_storage.clone();
+                            tokio::task::block_in_place(move || {
+                                let p = MatchPattern::builder().words(rp.0).mode(rp.1).build();
+                                let _ = pattern_storage.add(name, p, default);
+                                let _ = responder.send(ActionRes::Success);
+                            });
+                        }
+                    },
+                    Action::Get(a) => match a {
+                        GetAction::Messages { channel, author } => {
+                            tokio::task::block_in_place(move || {
+                                let sqlt = rusqlite::Connection::open(TWITCH_DB_PATH).unwrap();
+                                let vm = get_messages(&sqlt, author, channel);
+                                let res = serde_json::to_string_pretty(&vm).unwrap();
+                                let _ = responder.send(ActionRes::Data(res));
+                            });
+                        }
+                    },
+                    Action::Kill => {
+                        let _ = kill_tx.clone().lock().unwrap().take().unwrap().send(());
+                    }
+                },
+                AppEvent::Error => {
+                    panic!("something went wrong");
+                }
+            };
+        }
+    });
 
+    let _ = kill_rx.await;
     close_socket()?;
 
     Ok(())
 }
 
-fn spawn_processor(active_pattern: LockedDefaultPattern) -> crossbeam::channel::Sender<String> {
-    let (msg_sender, msg_receiver) = crossbeam::channel::unbounded::<String>();
+fn spawn_processor(pattern_storage: Arc<PatternStorage>) -> crossbeam::channel::Sender<String> {
+    let (msg_sender, msg_receiver) = crossbeam::channel::bounded::<String>(64);
     let _ = std::thread::spawn(move || {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
@@ -146,11 +186,15 @@ fn spawn_processor(active_pattern: LockedDefaultPattern) -> crossbeam::channel::
             .unwrap();
 
         for msg in msg_receiver {
-            let lock = active_pattern.read().unwrap();
+            let lock = pattern_storage.default_pattern().read().unwrap();
+
             if let Some(p) = lock.clone() {
                 pool.spawn(move || {
-                    if p.read().unwrap().match_str(&msg) {
-                        print!("{}", msg)
+                    if let Some(privmsg) = parse_privmsg(&msg) {
+                        if p.read().unwrap().match_str(&privmsg.message) {
+                            let sqlt = rusqlite::Connection::open(TWITCH_DB_PATH).unwrap();
+                            insert_message(&sqlt, privmsg);
+                        }
                     }
                 })
             }
@@ -159,7 +203,7 @@ fn spawn_processor(active_pattern: LockedDefaultPattern) -> crossbeam::channel::
     msg_sender
 }
 
-fn spawn_socket(emitter: tokio::sync::mpsc::Sender<AppEvent>) -> std::io::Result<()> {
+fn spawn_socket(emitter: AppEventEmitter) -> std::io::Result<()> {
     close_socket()?;
     let _ = tokio::spawn(async move {
         let ul = UnixListener::bind(SOCKET_PATH)?;
@@ -170,9 +214,7 @@ fn spawn_socket(emitter: tokio::sync::mpsc::Sender<AppEvent>) -> std::io::Result
             let action = serde_json::from_slice::<Action>(&buf)?;
 
             let (responder, res_receiver) = tokio::sync::oneshot::channel();
-            let _ = emitter
-                .send(AppEvent::ExternalAction { action, responder })
-                .await;
+            let _ = emitter.send(AppEvent::ExternalAction { action, responder });
             let res = res_receiver.await.unwrap();
 
             stream.write_all(&serde_json::to_vec(&res)?).await?;

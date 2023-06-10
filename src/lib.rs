@@ -10,6 +10,7 @@ pub mod storage;
 pub mod twitch;
 
 pub const SOCKET_PATH: &str = "/tmp/chatspy.socket";
+pub const TWITCH_DB_PATH: &str = "./twitch_storage.sqlite";
 
 #[derive(Debug)]
 pub enum TwitchEvent {
@@ -28,20 +29,18 @@ pub enum AppEvent {
 
 type Locked<T> = Arc<RwLock<T>>;
 pub type LockedPattern = Locked<MatchPattern>;
-pub type LockedPatternMap = Locked<FnvHashMap<String, LockedPattern>>;
-pub type LockedDefaultPattern = Locked<Option<LockedPattern>>;
 
 #[derive(Debug)]
 pub struct PatternStorage {
-    patterns: LockedPatternMap,
-    default_pattern: LockedDefaultPattern,
+    patterns: RwLock<FnvHashMap<String, LockedPattern>>,
+    default_pattern: RwLock<Option<LockedPattern>>,
 }
 
 impl PatternStorage {
     pub fn new() -> Self {
         PatternStorage {
-            patterns: Arc::new(RwLock::new(FnvHashMap::default())),
-            default_pattern: Arc::new(RwLock::new(None)),
+            patterns: RwLock::new(FnvHashMap::default()),
+            default_pattern: RwLock::new(None),
         }
     }
 
@@ -60,8 +59,8 @@ impl PatternStorage {
         }
     }
 
-    pub fn default_pattern(&self) -> LockedDefaultPattern {
-        self.default_pattern.clone()
+    pub fn default_pattern(&self) -> &RwLock<Option<LockedPattern>> {
+        &self.default_pattern
     }
 }
 

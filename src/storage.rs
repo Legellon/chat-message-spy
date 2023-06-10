@@ -1,4 +1,6 @@
-use rusqlite::{Connection, Error};
+use crate::twitch::UserMessage;
+use rusqlite::{params_from_iter, Connection, Error};
+use serde::{Deserialize, Serialize};
 
 fn insert_twitch_message(_conn: &Connection, _message: TwitchMessage) {}
 
@@ -9,18 +11,18 @@ pub struct TwitchToken {
     pub login: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct TwitchMessage {
-    pub id: Option<u64>,
-    pub author: Option<String>,
-    pub content: Option<String>,
-    pub chat: Option<String>,
-    pub time: Option<String>,
+    pub id: u64,
+    pub author: String,
+    pub message: String,
+    pub channel: String,
+    pub time: String,
 }
 
 pub fn run_init_migration(conn: &Connection) {
     create_token_table(conn);
-    create_message_table(conn);
+    create_messages_table(conn);
 }
 
 pub fn create_token_table(conn: &Connection) {
@@ -57,14 +59,14 @@ pub fn get_stored_users(db_conn: &Connection) -> Vec<TwitchToken> {
     }
 }
 
-pub fn create_message_table(conn: &Connection) {
+pub fn create_messages_table(conn: &Connection) {
     if let Err(e) = conn.execute(
-        "CREATE TABLE message (\
+        "CREATE TABLE messages (\
         id      INTEGER PRIMARY KEY,\
         author  TEXT NOT NULL,\
-        content TEXT NOT NULL,\
-        chat    TEXT NOT NULL,\
-        time    TIMESTAMP\
+        message TEXT NOT NULL,\
+        channel TEXT NOT NULL,\
+        time    TIMESTAMP DATETIME DEFAULT CURRENT_TIMESTAMP\
         )",
         (),
     ) {
@@ -72,9 +74,50 @@ pub fn create_message_table(conn: &Connection) {
     }
 }
 
+pub fn insert_message(conn: &Connection, privmsg: UserMessage) {
+    conn.execute(
+        "INSERT INTO messages (author, message, channel) VALUES (?1, ?2, ?3)",
+        (privmsg.author, privmsg.message, privmsg.channel),
+    )
+    .unwrap();
+}
+
+pub fn get_messages(
+    conn: &Connection,
+    author: Option<String>,
+    channel: Option<String>,
+) -> Vec<TwitchMessage> {
+    let (sql, params) = match (author, channel) {
+        (None, None) => ("SELECT * FROM messages", vec![]),
+        (Some(a), Some(ch)) => (
+            "SELECT * FROM messages WHERE author=?1 AND channel=?2",
+            vec![a, ch],
+        ),
+        (_, Some(ch)) => ("SELECT * FROM messages WHERE channel=?1", vec![ch]),
+        (Some(a), _) => ("SELECT * FROM messages WHERE author=?1", vec![a]),
+    };
+
+    match conn.prepare(sql) {
+        Ok(mut s) => s
+            .query_map(params_from_iter(params), |row| {
+                Ok(TwitchMessage {
+                    id: row.get(0).unwrap(),
+                    author: row.get(1).unwrap(),
+                    message: row.get(2).unwrap(),
+                    channel: row.get(3).unwrap(),
+                    time: row.get(4).unwrap(),
+                })
+            })
+            .unwrap()
+            .map(|u| u.unwrap())
+            .collect(),
+        Err(e) => panic!("ERROR: failed to select from 'token': {}", e),
+    }
+}
+
 fn ignore_table_exists_error(e: Error) {
     match e {
-        //Error has values which indicate that this is 'table already exists' error
+        // Error has values which indicate that this is 'table already exists' error
         Error::SqlInputError {
             error:
                 rusqlite::ffi::Error {
@@ -83,7 +126,7 @@ fn ignore_table_exists_error(e: Error) {
                 },
             ..
         } => {}
-        //Otherwise, panic
+        // Otherwise, panic
         e => panic!("{:?}", e),
     };
 }

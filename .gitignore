@@ -1,3 +1,4 @@
 /target
 .idea
 storage.sqlite
+twitch_storage.sqlite

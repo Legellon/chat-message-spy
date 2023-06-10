@@ -8,14 +8,7 @@ type RawPattern = (Vec<String>, MatchMode);
 #[derive(Deserialize, Serialize, Debug)]
 pub enum PartAction {
     All,
-    One(String),
-    Many(Channels),
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum JoinAction {
-    One(String),
-    Many(Channels),
+    Some(Channels),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -35,15 +28,26 @@ pub enum AddAction {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum TwitchAction {
-    Join(JoinAction),
+    Join(Channels),
     Start(StartAction),
     Part(PartAction),
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum GetAction {
+    Messages {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum Action {
     Twitch(TwitchAction),
     Add(AddAction),
+    Get(GetAction),
     Kill,
 }
 
@@ -72,5 +76,6 @@ pub enum ActionRes {
         errors: Vec<Error>,
         level: FailureLevel,
     },
+    Data(String),
     Success,
 }
