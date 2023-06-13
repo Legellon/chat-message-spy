@@ -1,3 +1,5 @@
+#![feature(lazy_cell)]
+
 use crate::match_pattern::MatchPattern;
 use crate::protocol::{Action, ActionRes};
 use fnv::FnvHashMap;
@@ -27,20 +29,22 @@ pub enum AppEvent {
     Error,
 }
 
-type Locked<T> = Arc<RwLock<T>>;
 pub type LockedPattern = Locked<MatchPattern>;
+pub type AppEventEmitter = crossbeam::channel::Sender<AppEvent>;
+
+type Locked<T> = Arc<RwLock<T>>;
 
 #[derive(Debug)]
 pub struct PatternStorage {
     patterns: RwLock<FnvHashMap<String, LockedPattern>>,
-    default_pattern: RwLock<Option<LockedPattern>>,
+    active_pattern: RwLock<Option<LockedPattern>>,
 }
 
 impl PatternStorage {
     pub fn new() -> Self {
         PatternStorage {
             patterns: RwLock::new(FnvHashMap::default()),
-            default_pattern: RwLock::new(None),
+            active_pattern: RwLock::new(None),
         }
     }
 
@@ -48,7 +52,7 @@ impl PatternStorage {
         let mut patterns_lock = self.patterns.write().unwrap();
         if !patterns_lock.contains_key(&n) {
             let p = Arc::new(RwLock::new(p));
-            let mut default_lock = self.default_pattern.write().unwrap();
+            let mut default_lock = self.active_pattern.write().unwrap();
             if default_lock.is_none() || new_default {
                 *default_lock = Some(p.clone());
             }
@@ -60,7 +64,7 @@ impl PatternStorage {
     }
 
     pub fn default_pattern(&self) -> &RwLock<Option<LockedPattern>> {
-        &self.default_pattern
+        &self.active_pattern
     }
 }
 

@@ -33,6 +33,7 @@ enum GetCommand {
         #[arg(short, long)]
         channel: Option<String>,
     },
+    Channels,
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,14 +102,15 @@ fn parse_get(a: GetCommand) -> Action {
         GetCommand::Messages { author, channel } => {
             Action::Get(GetAction::Messages { author, channel })
         }
+        GetCommand::Channels => Action::Get(GetAction::Channels),
     }
 }
 
 #[tokio::main]
 async fn main() -> IoResult<()> {
-    let cli = Args::parse();
+    let args = Args::parse();
 
-    let action = match cli.command {
+    let action = match args.command {
         CliCommand::Start { channels } => parse_start(channels),
         CliCommand::Part { channels } => parse_part(channels),
         CliCommand::Join { channels } => parse_join(channels),

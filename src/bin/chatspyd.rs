@@ -1,8 +1,10 @@
 use chatspy::match_pattern::MatchPattern;
 use chatspy::protocol::*;
 use chatspy::storage::{get_messages, insert_message, run_init_migration};
-use chatspy::twitch::{AppEventEmitter, parse_privmsg, spawn_twitch_irc, TwitchConnectionCmd};
-use chatspy::{AppEvent, PatternStorage, TwitchEvent, SOCKET_PATH, TWITCH_DB_PATH};
+use chatspy::twitch::{parse_privmsg, spawn_twitch_irc, TwitchCmd, TwitchCmdType, TwitchInfoCmd};
+use chatspy::{
+    AppEvent, AppEventEmitter, PatternStorage, TwitchEvent, SOCKET_PATH, TWITCH_DB_PATH,
+};
 use clap::Parser;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -123,6 +125,7 @@ async fn main() -> std::io::Result<()> {
 
     let _ = std::thread::spawn(move || {
         while let Ok(e) = event_receiver.recv() {
+            println!("{:?}", e);
             match e {
                 AppEvent::Twitch(e) => match e {
                     TwitchEvent::Message(m) => {
@@ -130,9 +133,9 @@ async fn main() -> std::io::Result<()> {
                     }
                 },
                 AppEvent::ExternalAction { action, responder } => match action {
-                    Action::Twitch(a) => {
-                        let _ = twitch_cmd_sender.blocking_send(TwitchConnectionCmd {
-                            action: a,
+                    Action::Twitch(action) => {
+                        let _ = twitch_cmd_sender.blocking_send(TwitchCmd {
+                            action: TwitchCmdType::Connection(action),
                             responder,
                         });
                     }
@@ -159,6 +162,13 @@ async fn main() -> std::io::Result<()> {
                                 let _ = responder.send(ActionRes::Data(res));
                             });
                         }
+                        GetAction::Channels => {
+                            let _ = twitch_cmd_sender.blocking_send(TwitchCmd {
+                                action: TwitchCmdType::Info(TwitchInfoCmd::Channels),
+                                responder,
+                            });
+                        }
+                        GetAction::Patterns => {}
                     },
                     Action::Kill => {
                         let _ = kill_tx.clone().lock().unwrap().take().unwrap().send(());
